@@ -1,0 +1,333 @@
+library(GGally)
+library(ggplot2)
+library(corrplot)
+library(dplyr)
+library(mice)
+library(ROSE)
+library(caret)
+library(kableExtra)
+library(glmnet)
+library(knitr)
+library(DT)
+library(flextable)
+library(webshot2)
+library(questionr)
+library(reshape2)
+library(gridExtra)
+library(car)
+
+GPU_data <- read.csv("D:/data/All_GPUs.csv") 
+
+ncol(GPU_data)
+nrow(GPU_data)
+
+CPU_data <- read.csv("D:/data/Intel_CPUs.csv") 
+
+kable(head(CPU_data, 10), caption = "10 dòng đầu của GPU_data") %>%
+  kable_styling(bootstrap_options = c("striped", "hover"), full_width = FALSE)
+
+ncol(CPU_data)
+nrow(CPU_data)
+
+#############PREPROCESSING#########################
+any(grepl("\n", as.matrix(CPU_data)))
+row_has_empty <- apply(CPU_data, 1, function(row) any(row == "", na.rm = TRUE))
+which(row_has_empty)
+
+CPU_data[CPU_data == ""] <- NA
+CPU_data[] <- lapply(CPU_data, function(x) gsub("^\\n$", NA, x))
+CPU_data[] <- lapply(CPU_data, function(x) gsub("^\\n- $", NA, x))
+
+freq.na(CPU_data)
+
+result <- freq.na(CPU_data)
+data <- as.data.frame(result)
+
+NA_summary <- data.frame(freq.na(CPU_data))
+colnames(NA_summary) <- c("Missing", "Percent")
+selected_columns <- rownames(NA_summary[NA_summary$Percent < 10, ])
+new_CPU_data <- CPU_data[, selected_columns]
+new_CPU_data<-na.omit(new_CPU_data)
+
+summary(new_CPU_data)
+str(new_CPU_data)
+
+#############CLEAN AND TRANSFORM#########################
+new_CPU_data$TDP <- as.numeric(gsub(" W", "", new_CPU_data$TDP))
+new_CPU_data$Processor_Base_Frequency <- as.numeric(gsub(" GHz", "", new_CPU_data$Processor_Base_Frequency))
+new_CPU_data$Cache <- as.numeric(gsub(" MB.*", "", new_CPU_data$Cache))
+new_CPU_data$Recommended_Customer_Price <- as.numeric(gsub("[$ ]", "", new_CPU_data$Recommended_Customer_Price))
+new_CPU_data$nb_of_Cores <- as.numeric(new_CPU_data$nb_of_Cores)
+
+# Binary factor cleanup
+new_CPU_data$Intel_Virtualization_Technology_VTx_ <- as.factor(new_CPU_data$Intel_Virtualization_Technology_VTx_)
+new_CPU_data$Embedded_Options_Available <- as.factor(new_CPU_data$Embedded_Options_Available)
+
+# Categorical conversion
+new_CPU_data$Vertical_Segment <- as.factor(new_CPU_data$Vertical_Segment)
+new_CPU_data$Status <- as.factor(new_CPU_data$Status)
+new_CPU_data$Product_Collection <- as.factor(new_CPU_data$Product_Collection)
+new_CPU_data$Instruction_Set <- as.factor(new_CPU_data$Instruction_Set)
+
+
+summary(new_CPU_data)
+
+#############DRAW CORRELATION GRAPH#########################
+# Ép kiểu số (loại bỏ ký tự không cần thiết trước)
+numeric_vars <- new_CPU_data[, c("TDP", "nb_of_Cores", 
+                                 "Processor_Base_Frequency", 
+                                 "Cache", "Lithography")]
+
+numeric_vars$TDP <- as.numeric(gsub("[^0-9.]", "", numeric_vars$TDP))
+numeric_vars$nb_of_Cores <- as.numeric(gsub("[^0-9.]", "", numeric_vars$nb_of_Cores))
+numeric_vars$Processor_Base_Frequency <- as.numeric(gsub("[^0-9.]", "", numeric_vars$Processor_Base_Frequency))
+numeric_vars$Cache <- as.numeric(gsub("[^0-9.]", "", numeric_vars$Cache))
+numeric_vars$Lithography <- as.numeric(gsub("[^0-9.]", "", numeric_vars$Lithography))
+
+# Xóa dòng nào có NA để đảm bảo đủ cặp so sánh
+numeric_vars <- na.omit(numeric_vars)
+
+# Kiểm tra lại
+str(numeric_vars)
+cor_matrix <- cor(numeric_vars, use = "complete.obs", method = "pearson")
+print(cor_matrix)
+corrplot(cor_matrix, method = "color", addCoef.col = "black", tl.cex = 0.8, number.cex = 0.8)
+
+##############CALCULATE VARIABLES#####################
+names(new_CPU_data)
+main_data <- new_CPU_data[, c("TDP", "nb_of_Cores", 
+                              "Processor_Base_Frequency", 
+                              "Cache", "Lithography")]
+
+# 2. Giữ lại chỉ các cột số
+numeric_vars <- sapply(main_data, is.numeric)
+numeric_data <- main_data[, numeric_vars]
+
+# 3. Tính các chỉ số thống kê mô tả
+summary_stats <- sapply(numeric_data, function(x) {
+  x <- x[!is.na(x)]  # loại bỏ NA
+  c(
+    Mean   = mean(x),
+    SD     = sd(x),
+    Min    = min(x),
+    Q1     = quantile(x, 0.25),
+    Median = median(x),
+    Q3     = quantile(x, 0.75),
+    Max    = max(x)
+  )
+})
+
+# 4. Chuyển thành bảng và in ra đẹp
+descriptive_table <- t(as.data.frame(summary_stats))
+print(round(descriptive_table, 2))
+
+
+# Chọn biến factor
+factor_vars <- sapply(new_CPU_data, is.factor)
+factor_data <- new_CPU_data[, factor_vars]
+
+# Danh sách biến cần giữ lại (bạn có thể thêm hoặc bớt tuỳ ý)
+selected_factor_names <- c("Instruction_Set", 
+                           "Intel_Virtualization_Technology_VTx_", 
+                           "Embedded_Options_Available", 
+                           "Vertical_Segment", 
+                           "Status")
+
+# Lọc dữ liệu chỉ giữ các biến cần thiết
+filtered_factor_data <- factor_data[, selected_factor_names]
+
+# Hàm thống kê: tần suất và phần trăm
+describe_factor <- function(x) {
+  freq <- table(x)
+  percent <- prop.table(freq) * 100
+  data.frame(Level = names(freq), Count = as.vector(freq), Percentage = round(as.vector(percent), 2))
+}
+
+# Áp dụng hàm cho từng biến factor
+factor_summaries <- lapply(filtered_factor_data, describe_factor)
+
+# Đặt tên cho từng bảng kết quả
+names(factor_summaries) <- selected_factor_names
+
+# In ra kết quả (tùy chọn)
+for (var in names(factor_summaries)) {
+  cat("\n---", var, "---\n")
+  print(factor_summaries[[var]])
+}
+
+table(new_CPU_data$Intel_Virtualization_Technology_VTx_)
+table(new_CPU_data$Instruction_Set)
+table(new_CPU_data$Vertical_Segment)
+table(new_CPU_data$Status)
+
+#################################################
+p <- ggplot(main_data, aes(x = TDP)) +
+  geom_histogram(fill = "lightblue", color = "black", bins = 15) +
+  labs(
+    title = "Histogram of TDP",
+    x = "TDP (Watt)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+print(p)
+
+
+
+
+###########TRANSFORMTOLOG###########################
+main_data$TDP<-log(main_data$TDP)
+main_data$nb_of_Cores<-log(main_data$nb_of_Cores)
+main_data$Cache<-log(main_data$Cache)
+main_data$Processor_Base_Frequency<-log(main_data$Processor_Base_Frequency)
+
+p <- ggplot(main_data, aes(x = TDP)) +
+  geom_histogram(fill = "lightblue", color = "black", bins = 15) +
+  labs(
+    title = "Histogram of TDP",
+    x = "TDP (Watt)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+print(p)
+
+######################################
+main_data$Vertical_Segment <- new_CPU_data$Vertical_Segment
+
+# Đảm bảo biến là factor
+main_data$Vertical_Segment <- as.factor(main_data$Vertical_Segment)
+
+# Rồi vẽ lại biểu đồ
+ggplot(main_data, aes(x = Vertical_Segment, y = log(TDP + 1))) + 
+  geom_boxplot(fill = "lightblue", color = "black") + 
+  labs(title = "Boxplot of log(TDP) across Vertical Segments", 
+       x = "Vertical Segment", y = "log(TDP)") + theme_minimal()
+
+print(plot_data)
+
+#################################################
+# Scatter plot: log(TDP) vs log(nb_of_Cores)
+ggplot(main_data, aes(x = log(nb_of_Cores + 1), y = log(TDP + 1))) +
+  geom_point(color = "red") +
+  labs(title = "Scatter Plot of log(TDP) and log(Number of Cores)",
+       x = "log(Number of Cores)", y = "log(TDP)") +
+  theme_minimal()
+
+# Scatter plot: log(TDP) vs log(Processor_Base_Frequency)
+ggplot(main_data, aes(x = log(Processor_Base_Frequency + 1), y = log(TDP + 1))) +
+  geom_point(color = "blue") +
+  labs(title = "Scatter Plot of log(TDP) and log(Processor Base Frequency)",
+       x = "log(Processor Base Frequency)", y = "log(TDP)") +
+  theme_minimal()
+
+# Scatter plot: log(TDP) vs log(Cache)
+ggplot(main_data, aes(x = log(Cache + 1), y = log(TDP + 1))) +
+  geom_point(color = "purple") +
+  labs(title = "Scatter Plot of log(TDP) and log(Cache)",
+       x = "log(Cache)", y = "log(TDP)") +
+  theme_minimal()
+
+
+#################################################
+# Bước 1: Ép Lithography thành factor trước khi chia dữ liệu
+main_data$Lithography <- as.factor(main_data$Lithography)
+
+# Bước 2: Chia dữ liệu
+set.seed(10)
+train.rows <- sample(rownames(main_data), dim(main_data)[1] * 0.8)
+train_data <- main_data[train.rows, ]
+test.rows <- setdiff(rownames(main_data), train.rows)
+test_data <- main_data[test.rows, ]
+
+# Bước 3: Đảm bảo test_data có đúng levels như train_data
+test_data$Lithography <- factor(test_data$Lithography, levels = levels(train_data$Lithography))
+
+# Bước 4: Huấn luyện lại mô hình nếu cần
+model <- lm(log(TDP + 1) ~ log(nb_of_Cores + 1) + log(Processor_Base_Frequency + 1) + 
+              log(Cache + 1) + Lithography, data = train_data)
+
+# Bước 5: Dự đoán
+test_data <- test_data[test_data$Lithography != "250 nm", ]
+test_data$predicted <- predict(model, newdata = test_data)
+kable(head(test_data, 10), digits = 3, caption = "Prediction Results on Test Data") %>%
+  kable_styling(bootstrap_options = c("striped", "hover", "condensed"), 
+                full_width = F, position = "center")
+
+# Tính lại giá trị gốc
+#actual_value <- exp(test_data$TDP)
+#predicted_value <- exp(test_data$predicted)
+
+# Tính độ chênh lệch (có thể lấy tuyệt đối hoặc giữ dấu)
+#difference <- actual_value - predicted_value  # hoặc abs(actual_value - predicted_value)
+
+# Tạo bảng so sánh
+#compare <- data.frame(
+#  Actual_TDP = actual_value,
+#  Predicted_TDP = predicted_value,
+#  Difference = difference
+#)
+
+# Hiển thị vài dòng đầu
+#head(compare, 10)
+
+#ggplot(compare, aes(x = Actual_TDP, y = Predicted_TDP)) +
+#  geom_point() +
+#  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+#  labs(
+#    title = "Actual vs Predicted Values (TDP)",
+#    x = "Actual Values",
+#    y = "Predicted Values"
+#  ) +
+#  xlim(0, NA) + ylim(0, NA) +  # Đảm bảo vẽ từ gốc toạ độ
+#  theme_minimal()
+
+model2 <- lm(TDP ~ nb_of_Cores + Processor_Base_Frequency + Cache + Lithography + Vertical_Segment, data = train_data)
+
+# Dự đoán trên test data
+test_data$predicted_raw <- predict(model2, newdata = test_data)
+
+# Vẽ biểu đồ gốc
+ggplot(test_data, aes(x = TDP, y = predicted_raw)) +
+  geom_point() +
+  geom_abline(slope = 1, intercept = 0, color = "red", linetype = "dashed") +
+  labs(title = "Actual vs Predicted (TDP)", x = "Actual TDP (Watt)", y = "Predicted TDP (Watt)") +
+  xlim(0, NA) + ylim(0, NA) +
+  theme_minimal()
+
+#############DRAW DISTRIBUTION GRAPH#############
+
+df <- new_CPU_data
+
+# Các biến muốn vẽ
+selected_vars <- c("TDP", "nb_of_Cores", "Processor_Base_Frequency", "Cache", "Lithography")
+
+# Hàm tạo 2 biểu đồ stacked dọc: boxplot ở trên, histogram ở dưới
+plot_hist_box <- function(data, var_name) {
+  clean_data <- data[!is.na(data[[var_name]]), ]
+  if (!is.numeric(clean_data[[var_name]])) return(NULL)
+  
+  p_box <- ggplot(clean_data, aes_string(x = var_name)) +
+    geom_boxplot(fill = "tomato", outlier.colour = "black", height = 0.3) +
+    theme_minimal() +
+    theme(axis.title.y = element_blank(),
+          axis.text.y = element_blank(),
+          axis.ticks.y = element_blank(),
+          plot.margin = margin(5, 5, 0, 5))
+  
+  p_hist <- ggplot(clean_data, aes_string(x = var_name)) +
+    geom_histogram(fill = "cornflowerblue", bins = 30, alpha = 0.7) +
+    labs(title = var_name, x = NULL, y = "Count") +
+    theme_minimal() +
+    theme(plot.margin = margin(0, 5, 5, 5))
+  
+  # Ghép lại theo chiều dọc
+  gridExtra::grid.arrange(p_box, p_hist, ncol = 1, heights = c(1, 3))
+}
+
+# Tạo danh sách plot
+plots <- lapply(selected_vars, function(var) plot_hist_box(df, var))
+plots <- Filter(Negate(is.null), plots)
+
+# Ghép nhiều biến thành lưới 2 cột
+grid.arrange(grobs = plots, ncol = 2)
