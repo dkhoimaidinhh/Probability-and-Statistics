@@ -23,6 +23,9 @@ install.packages(c(
   "caret", "kableExtra", "glmnet", "knitr", "DT", "flextable",
   "webshot2", "questionr", "reshape2", "gridExtra", "car"
 ))
+```
+## License
+This project is for educational purposes only. Data is obtained from Intel's public specifications.
 
 
 
